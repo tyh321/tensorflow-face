@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1,user-scalable=no" />
+        <title>Document</title>
+        <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/vant/2.12.25/index.min.css" />
+    </head>
+    <body>
+        <style>
+            .canvas-wrapper {
+                position: relative;
+                -webkit-user-select: none;
+                -moz-user-select: none;
+                -ms-user-select: none;
+                user-select: none;
+                margin: 0 auto;
+                border-radius: 50%;
+                overflow: hidden;
+            }
+
+            .canvas-wrapper > video {
+                background: #000;
+                border-radius: 50%;
+                overflow: hidden;
+            }
+
+            .canvas-wrapper > canvas {
+                position: absolute;
+                top: 0;
+                left: 0;
+                z-index: 1;
+                border-radius: 50%;
+                overflow: hidden;
+            }
+        </style>
+        <div id="app">
+            <div class="canvas-wrapper" :style="{width:width+'px',height:height+'px'}">
+                <video ref="video" :width="width" :height="height" webkit-playsinline="true" playsinline="true" preload autoplay loop muted></video>
+                <canvas ref="canvas" :width="width" :height="height"></canvas>
+            </div>
+            <!-- <van-button :type="loading ? 'danger' : 'primary'" @click="loading ? stop() : start()">{{loading ? '结束录制' : '开始录制'}}</van-button> -->
+        </div>
+
+        <script src="./js/vue.min.js"></script>
+        <script src="./js/vant.min.js"></script>
+
+        <script src="./js/tf.min.js"></script>
+        <script src="./js/face_mesh.min.js"></script>
+        <script src="./js/face-landmarks-detection.min.js"></script>
+
+        <script>
+            new Vue({
+                el: '#app',
+                data: {
+                    width: 280,
+                    height: 280,
+                    mediaRecorder: '',
+                    blob: '',
+                    stream: '',
+                    loading: false,
+                    detector: '',
+                    rafId: '',
+                    faceNullFrequency: 0,
+                    isFarArr: [],
+                },
+                mounted() {
+                    const size = (document.documentElement.clientWidth || window.innerWidth) * 0.6;
+                    this.width = size;
+                    this.height = size;
+                    this.openUserMedia();
+                },
+                methods: {
+                    async openUserMedia() {
+                        let mediaOpts = {
+                            audio: false,
+                            video: true,
+                            video: {
+                                width: this.width,
+                                height: this.height,
+                                facingMode: 'user',
+                                frameRate: {
+                                    ideal: 100,
+                                    max: 150,
+                                }, //最佳帧率
+                            },
+                        };
+
+                        this.stream = await navigator.mediaDevices?.getUserMedia(mediaOpts);
+
+                        let video = this.$refs['video'];
+                        let canvas = this.$refs['canvas'];
+                        var context = canvas.getContext('2d');
+
+                        video.pause();
+
+                        video.setAttribute('playsinline', true); // required to tell iOS safari we don't want fullscreen
+
+                        if ('srcObject' in video) {
+                            video.srcObject = this.stream;
+                        } else {
+                            video.src = (window.URL && window.URL.createObjectURL(this.stream)) || this.stream;
+                        }
+
+                        video.play();
+
+                        video.onplay = () => {
+                            console.log('ok');
+                        };
+
+                        setTimeout(async () => {
+                            const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
+                            const detectorConfig = {
+                                maxFaces: 1, //检测到的最大面部数量
+                                refineLandmarks: true, //可以完善眼睛和嘴唇周围的地标坐标，并在虹膜周围输出其他地标
+                                runtime: 'mediapipe',
+                                solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh', //WASM二进制文件和模型文件所在的路径
+                            };
+                            this.detector = await faceLandmarksDetection.createDetector(model, detectorConfig);
+
+                            this.rafId = requestAnimationFrame(render);
+
+                            const self = this;
+                            async function render() {
+                                context.clearRect(0, 0, canvas.width, canvas.height);
+                                const Faces = await self.detector.estimateFaces(video, {
+                                    flipHorizontal: false, //镜像
+                                });
+
+                                if (Faces.length > 0) {
+                                    self.faceNullFrequency = 0;
+                                    drawResults(Faces, context);
+                                } else {
+                                    self.faceNullFrequency++;
+                                    //连续5帧没有检测到人脸提示
+                                    if (self.faceNullFrequency >= 5) {
+                                        vant.Toast(`没有检测到人脸`);
+                                    }
+                                }
+
+                                self.rafId = requestAnimationFrame(render);
+
+                                //绘制
+                                function drawResults(faces, ctx) {
+                                    faces.forEach(faceItem => {
+                                        ctx.fillStyle = '#1af117';
+                                        (faceItem.keypoints || []).forEach((element, index) => {
+                                            /* arc */
+                                            ctx.beginPath();
+                                            ctx.arc(element.x, element.y, 1, 0, 2 * Math.PI);
+                                            ctx.fill();
+                                            /* arc */
+                                        });
+                                        self.isFarAndNear(faceItem);
+                                    });
+                                }
+                            }
+                        }, 1000);
+                    },
+                    isFarAndNear(face) {
+                        const proportion = this.GetPercent(face.box.width * face.box.height, this.width * this.height);
+                        this.isFarArr.push(proportion);
+                        //计算4帧的动态变化
+                        if (this.isFarArr.length > 4) {
+                            this.isFarArr.shift();
+                            if (this.Increment(this.isFarArr) || this.Decrease(this.isFarArr)) {
+                                const first = this.isFarArr[0];
+                                const last = this.isFarArr[this.isFarArr.length - 1];
+                                const diff = this.GetPercent(first - last, first + last);
+                                if (diff <= -5) {
+                                    vant.Toast(`【动作】靠近`, `info`);
+                                    // this.triggerAction(1);
+                                }
+                                if (diff >= 5) {
+                                    vant.Toast(`【动作】远离`, `primary`);
+                                    // this.triggerAction(0);
+                                }
+                            }
+                        }
+                    },
+                    start() {
+                        this.loading = true;
+                        this.mediaRecorder = new MediaRecorder(this.stream, {
+                            audioBitsPerSecond: 0, //音频码率
+                            videoBitsPerSecond: 1000000 * 20, //视频码率 (数值越大视频越清晰)
+                            // mimeType: 'video/webm;codecs=h264' //视频编码格式
+                        });
+
+                        this.mediaRecorder.start();
+
+                        this.mediaRecorder.ondataavailable = e => {
+                            this.blob = new Blob([e.data], {
+                                type: e.currentTarget.mimeType,
+                            });
+                        };
+
+                        this.mediaRecorder.onstop = e => {
+                            const url = window.URL && window.URL.createObjectURL(this.blob);
+
+                            vant.Dialog.confirm({
+                                title: '录制完成',
+                                message: `
+                                            <video src="${url}#t=0.01" style="display: block;width: 100%;" webkit-playsinline="true" playsinline="true" controls autoplay></video>
+                                            <div>
+                                               文件大小:${(this.blob.size / 1024).toFixed(2)}kb</span>
+                                            </div>
+                                        `,
+                                theme: 'round-button',
+                                className: 'videoDialog',
+                                confirmButtonText: '上传',
+                            }).then(() => {
+                                vant.Toast(`上传成功！`);
+                            });
+                        };
+                    },
+                    stop() {
+                        this.loading = false;
+                        this.mediaRecorder.stop();
+                    },
+                    //递增
+                    Increment(array) {
+                        let is = true;
+                        for (let i = 0; i < array.length - 1; i++) {
+                            var n1 = array[i];
+                            var n2 = array[i + 1];
+                            if (n1 > n2) {
+                                is = false;
+                                break;
+                            }
+                        }
+                        return array.length > 1 ? is : false;
+                    },
+                    //递减
+                    Decrease(array = []) {
+                        let is = true;
+                        for (let i = 0; i < array.length - 1; i++) {
+                            var n1 = array[i];
+                            var n2 = array[i + 1];
+                            if (n1 < n2) {
+                                is = false;
+                                break;
+                            }
+                        }
+                        return array.length > 1 ? is : false;
+                    },
+                    GetPercent(num, total) {
+                        num = parseFloat(num);
+                        total = parseFloat(total);
+                        if (isNaN(num) || isNaN(total)) {
+                            return '-';
+                        }
+                        return total <= 0 ? 0 : Math.round((num / total) * 10000) / 100.0;
+                    },
+                },
+            });
+        </script>
+    </body>
+</html>
